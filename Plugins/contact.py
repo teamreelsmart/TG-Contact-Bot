@@ -26,7 +26,7 @@ async def forward_to_admin(client: Client, message: Message):
         current_time = time.time()
         if current_time - user_cooldowns.get(user_id, 0) >= COOLDOWN_TIME:
             await message.reply(
-                "<blockquote><b><i>Owner Will Be Reply Soon</i>..</b></blockquote>", 
+                "<blockquote><b><i>ᴏᴡɴᴇʀ ᴡɪʟʟ ʙᴇ ʀᴇᴘʟʏ sᴏᴏɴ</i>..</b></blockquote>", 
                 parse_mode=enums.ParseMode.HTML,
                 quote=True
             )
