@@ -2,6 +2,8 @@ import time
 from pyrogram import Client, filters, enums
 from pyrogram.types import Message
 from config import ADMIN
+from Plugins.premium import consume_state_input, is_pending_user_input
+from Plugins import database as db
 
 # RAM memory dictionaries
 user_cooldowns = {}
@@ -11,9 +13,13 @@ message_memory = {}
 COOLDOWN_TIME = 300  # 5 minutes in seconds
 MAX_MEMORY_LIMIT = 100  # Max records before auto-cleaning
 
-@Client.on_message(filters.private & ~filters.user(ADMIN) & ~filters.command("start"))
+@Client.on_message(filters.private & ~filters.user(ADMIN) & ~filters.command(["start", "admin"]))
 async def forward_to_admin(client: Client, message: Message):
     user_id = message.from_user.id
+    if consume_state_input(user_id) or is_pending_user_input(user_id):
+        return
+    if db.is_banned(user_id):
+        return await message.reply("You are banned from using this bot.")
     try:
         fwd = await message.forward(ADMIN)
         message_memory[fwd.id] = user_id
