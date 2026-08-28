@@ -10,10 +10,18 @@ from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMa
 from config import ADMIN
 from Plugins import database as db
 
-# Ephemeral conversation state; business data is persisted in SQLite.
+# Ephemeral conversation state; business data is persisted in MongoDB.
 states = {}
 selections = {}
 consumed_inputs = set()
+
+SMALL_CAPS = str.maketrans("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ", "ᴀʙᴄᴅᴇғɢʜɪᴊᴋʟᴍɴᴏᴘǫʀsᴛᴜᴠᴡxʏᴢᴀʙᴄᴅᴇғɢʜɪᴊᴋʟᴍɴᴏᴘǫʀsᴛᴜᴠᴡxʏᴢ")
+
+
+def button(label, callback_data, emoji=""):
+    """Create consistently styled inline buttons without changing callback data."""
+    prefix = f"{emoji} " if emoji else ""
+    return InlineKeyboardButton(f"{prefix}{label.translate(SMALL_CAPS)}", callback_data=callback_data)
 
 def is_pending_user_input(user_id):
     return user_id in states
@@ -29,15 +37,15 @@ def admin_only(message):
     return bool(message.from_user and message.from_user.id == ADMIN)
 
 def plans_keyboard():
-    return InlineKeyboardMarkup([[InlineKeyboardButton(row["name"], callback_data=f"buy:{row['slug']}")] for row in db.get_plans()])
+    return InlineKeyboardMarkup([[button(row["name"], f"buy:{row['slug']}", "💎")] for row in db.get_plans()])
 
 def admin_keyboard():
-    buttons = [[("Ban user", "admin:ban"), ("Unban user", "admin:unban")],
-               [("Generate coupon", "admin:coupon"), ("Plans", "admin:plans")],
-               [("Add premium user", "admin:addpremium"), ("Premium users", "admin:users")],
-               [("Broadcast", "admin:broadcast"), ("UPI ID", "admin:upi")],
-               [("Premium channels", "admin:channel")]]
-    return InlineKeyboardMarkup([[InlineKeyboardButton(text, callback_data=data) for text, data in row] for row in buttons])
+    buttons = [[("Ban user", "admin:ban", "🚫"), ("Unban user", "admin:unban", "✅")],
+               [("Generate coupon", "admin:coupon", "🎟️"), ("Plans", "admin:plans", "💎")],
+               [("Add premium user", "admin:addpremium", "➕"), ("Premium users", "admin:users", "👥")],
+               [("Broadcast", "admin:broadcast", "📢"), ("UPI ID", "admin:upi", "💳")],
+               [("Premium channels", "admin:channel", "📣")]]
+    return InlineKeyboardMarkup([[button(text, data, emoji) for text, data, emoji in row] for row in buttons])
 
 def plan_text(plan, user, coupon=None):
     price = plan["discounted_price"]
@@ -54,16 +62,17 @@ async def start_cmd(client, message):
     db.initialise(); db.register_user(message.from_user)
     if db.is_banned(message.from_user.id):
         return await message.reply_text("You are banned from using this bot.")
-    text = (f"<b>Hi {message.from_user.first_name}! 👋</b>\n\nWelcome to our contact and premium access bot. "
-            "Use <b>Help</b> for assistance or explore our <b>Premium</b> plans.")
-    await message.reply_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Help", callback_data="home:help"), InlineKeyboardButton("Premium", callback_data="home:premium")]]))
+    text = (f"<blockquote><b>👋 Welcome, {message.from_user.first_name}!</b></blockquote>\n\n"
+            "<i>Get help instantly or explore exclusive premium access.</i>\n\n"
+            "<b>✨ Choose an option below to continue.</b>")
+    await message.reply_text(text, reply_markup=InlineKeyboardMarkup([[button("Help", "home:help", "🆘"), button("Premium", "home:premium", "💎")]]))
 
 @Client.on_message(filters.command("admin") & filters.private, group=-2)
 async def admin_command(client, message):
     db.initialise()
     if not admin_only(message):
         return await message.reply_text("❌ You are not authorised to use the admin panel.")
-    await message.reply_text("<b>Admin controls</b>", reply_markup=admin_keyboard())
+    await message.reply_text("<blockquote><b>🛠️ Admin controls</b></blockquote>\n<i>Choose an action below.</i>", reply_markup=admin_keyboard())
 
 @Client.on_callback_query(group=-2)
 async def callbacks(client: Client, query: CallbackQuery):
@@ -72,15 +81,15 @@ async def callbacks(client: Client, query: CallbackQuery):
     if db.is_banned(user.id):
         return
     if data == "home:help":
-        return await query.message.reply_text("<b>Help</b>\n\nChoose a premium plan, optionally apply a coupon, then pay using the generated UPI QR. Send the payment screenshot when prompted. For support, send a message here.")
+        return await query.message.reply_text("<blockquote><b>🆘 Help</b></blockquote>\n\n<i>Choose a premium plan, optionally apply a coupon, then pay with the generated UPI QR.</i>\n\n<b>📸 Send the payment screenshot when prompted.</b> For support, send a message here.")
     if data == "home:premium":
-        return await query.message.reply_text("<b>Choose a premium plan</b>", reply_markup=plans_keyboard())
+        return await query.message.reply_text("<blockquote><b>💎 Choose your premium plan</b></blockquote>\n<i>Select the access duration that suits you.</i>", reply_markup=plans_keyboard())
     if data.startswith("buy:"):
         plan = db.get_plan(data.split(":", 1)[1])
         if not plan: return
         selections[user.id] = {"plan": plan["slug"], "coupon": None}
         text, _ = plan_text(plan, user)
-        return await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Add coupon code", callback_data="pay:coupon"), InlineKeyboardButton("Proceed to pay", callback_data="pay:proceed")]]))
+        return await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup([[button("Add coupon code", "pay:coupon", "🎟️"), button("Proceed to pay", "pay:proceed", "💳")]]))
     if data == "pay:coupon":
         if user.id not in selections: return await query.message.reply_text("Please choose a plan first.")
         states[user.id] = {"action": "coupon"}
@@ -92,7 +101,7 @@ async def callbacks(client: Client, query: CallbackQuery):
         return await query.message.reply_text("Please send the payment screenshot.")
     if data.startswith("adminplan:") and user.id == ADMIN:
         slug = data.split(":", 1)[1]; states[user.id] = {"action":"plan_field", "plan":slug}
-        return await query.message.reply_text("Send what to edit:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Plan name", callback_data="field:name"), InlineKeyboardButton("Original price", callback_data="field:original_price")], [InlineKeyboardButton("Discounted price", callback_data="field:discounted_price")]]))
+        return await query.message.reply_text("Send what to edit:", reply_markup=InlineKeyboardMarkup([[button("Plan name", "field:name", "✏️"), button("Original price", "field:original_price", "💰")], [button("Discounted price", "field:discounted_price", "🏷️")]]))
     if data.startswith("field:") and user.id == ADMIN:
         if states.get(user.id,{}).get("action") != "plan_field": return
         states[user.id]["field"] = data.split(":",1)[1]; states[user.id]["action"] = "plan_value"
@@ -106,7 +115,7 @@ async def callbacks(client: Client, query: CallbackQuery):
         prompts = {"ban":"Send the user ID to ban.", "unban":"Send the user ID to unban.", "upi":"Send the new UPI ID.", "channel":"Send the premium channel ID (for example <code>-1001234567890</code>). The bot must be an admin with invite-user permission.", "broadcast":"Send or forward any text, photo, video, document, or other message to broadcast."}
         states[user.id] = {"action": action}; return await query.message.reply_text(prompts[action])
     if action == "plans":
-        return await query.message.reply_text("Select a plan to edit:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(p['name'], callback_data=f"adminplan:{p['slug']}")] for p in db.get_plans()]))
+        return await query.message.reply_text("Select a plan to edit:", reply_markup=InlineKeyboardMarkup([[button(p['name'], f"adminplan:{p['slug']}", "💎")] for p in db.get_plans()]))
     if action == "addpremium":
         states[user.id] = {"action":"premium_user"}; return await query.message.reply_text("Send the user ID to add as premium.")
     if action == "users":
@@ -126,9 +135,11 @@ async def send_payment_qr(client, message, user):
     uri = f"upi://pay?pa={upi}&pn=Premium%20Bot&am={amount}&cu=INR&tn={user.id}"
     image = qrcode.make(uri); output = io.BytesIO(); image.save(output, "PNG"); output.name = "payment-qr.png"; output.seek(0)
     code = coupon["code"] if coupon else "None"
-    caption = (f"<b>Pay ₹{amount} for {plan['name']}</b>\nUPI ID: <code>{upi}</code>\nNote: <code>{user.id}</code>\n"
-               f"Coupon applied: {code}\n\nScan the QR to pay ₹{amount}. Use your User ID as the note.\n\nAfter payment, tap below to send the screenshot.")
-    await client.send_photo(message.chat.id, output, caption=caption, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Send Payment Screenshot", callback_data="pay:screenshot")]]))
+    caption = (f"<blockquote><b>💳 Pay ₹{amount} for {plan['name']}</b></blockquote>\n"
+               f"<b>UPI ID:</b> <code>{upi}</code>\n<b>Note:</b> <code>{user.id}</code>\n"
+               f"<b>Coupon applied:</b> {code}\n\n<i>📱 Scan the QR to pay ₹{amount}. Use your User ID as the note.</i>\n\n"
+               "<b>📸 After payment, tap below to send the screenshot.</b>")
+    await client.send_photo(message.chat.id, output, caption=caption, reply_markup=InlineKeyboardMarkup([[button("Send payment screenshot", "pay:screenshot", "📸")]]))
 
 @Client.on_message(filters.private & ~filters.command(["start", "admin", "restart"]), group=-1)
 async def state_input(client, message: Message):
@@ -140,14 +151,14 @@ async def state_input(client, message: Message):
         selection = state.get("selection") or {}; plan = db.get_plan(selection.get("plan"))
         await message.copy(ADMIN, caption=f"<b>Payment verification required</b>\nUser ID: <code>{message.from_user.id}</code>\nName: {message.from_user.first_name}\nPlan: {plan['name'] if plan else 'Unknown'}\nCoupon: {selection.get('coupon') or 'None'}")
         states.pop(message.from_user.id, None)
-        return await message.reply_text("Your Payment Screenshot has been sent to admin. Please wait while we verify your payment. You will receive access once verified.")
+        return await message.reply_text("<blockquote><b>✅ Payment screenshot sent to admin</b></blockquote>\n\n<i>Please wait while we verify your payment.</i> You will receive access once verified.")
     text = (message.text or "").strip()
     if action == "coupon":
         coupon = db.get_coupon(text)
         if not coupon: return await message.reply_text("Send a valid coupon code.")
         selections[message.from_user.id]["coupon"] = coupon["code"]; states.pop(message.from_user.id, None)
         plan = db.get_plan(selections[message.from_user.id]["plan"]); rendered, _ = plan_text(plan, message.from_user, coupon)
-        return await message.reply_text(f"Coupon <code>{coupon['code']}</code> applied ({coupon['percent']}% off).\n\n{rendered}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Proceed to pay", callback_data="pay:proceed")]]))
+        return await message.reply_text(f"Coupon <code>{coupon['code']}</code> applied ({coupon['percent']}% off).\n\n{rendered}", reply_markup=InlineKeyboardMarkup([[button("Proceed to pay", "pay:proceed", "💳")]]))
     if message.from_user.id != ADMIN: return
     try:
         if action == "coupon_code": states[ADMIN] = {"action":"coupon_percent", "code":text.upper()}; return await message.reply_text("Send discount percentage (for example, 20).")
@@ -183,7 +194,7 @@ async def state_input(client, message: Message):
             uid=state["user_id"]; channel_id=channel_rows[0]["channel_id"]; ends=None if plan["duration_days"] == 0 else datetime.utcnow()+timedelta(days=plan["duration_days"])
             link=await client.create_chat_invite_link(channel_id, member_limit=1, name=f"Premium {uid}")
             db.add_premium(uid, plan["slug"], ends, channel_id); states.pop(ADMIN,None)
-            await client.send_message(uid, f"Here is your premium channel access link. It can be used only once; be careful.\n\n{link.invite_link}")
+            await client.send_message(uid, f"<blockquote><b>🎉 Your premium access link</b></blockquote>\n\n<i>🔐 This link can be used only once. Keep it private and use it carefully.</i>\n\n{link.invite_link}")
             return await message.reply_text("✅ Premium user added and single-use access link sent.")
     except (ValueError, AssertionError):
         return await message.reply_text("Invalid value. Please try again.")
