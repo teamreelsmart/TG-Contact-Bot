@@ -12,12 +12,16 @@
 - [x] Auto Memory Cleanup
 - [x] Restart Bot Anytime (Owner Only)
 - [x] 24x7 Uptime With Built-In Web Server
+- [x] Premium plans, UPI QR payments, coupons, and payment-screenshot review
+- [x] Admin panel for plans, coupons, broadcasts, UPI, premium channels, and access grants
+- [x] MongoDB persistence for plans, users, coupons, and settings
 
 ## Commands
 
 ```
 start - check I'm alive
 restart - restart bot (owner only)
+admin - open premium administration controls (owner only)
 ```
 
 ## Variables
@@ -26,6 +30,8 @@ restart - restart bot (owner only)
 * `API_HASH` API Hash from my.telegram.org
 * `BOT_TOKEN` Bot token from @BotFather
 * `ADMIN` Telegram Account Id of Owner
+* `MONGO_URI` MongoDB connection URI (required in production; MongoDB Atlas URI is supported)
+* `DATABASE_NAME` Optional MongoDB database name (default: `contact_bot`)
 
 
 ## How To Deploy
