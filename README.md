@@ -15,6 +15,7 @@
 - [x] Premium plans, UPI QR payments, coupons, and payment-screenshot review
 - [x] Admin panel for plans, coupons, broadcasts, UPI, premium channels, and access grants
 - [x] MongoDB persistence for plans, users, coupons, and settings
+- [x] Special-collection gallery, purchase links, manual payment approval, and access-link updates
 
 ## Commands
 

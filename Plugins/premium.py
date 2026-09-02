@@ -1,5 +1,6 @@
 import asyncio
 import io
+import uuid
 from datetime import datetime, timedelta
 
 import qrcode
@@ -44,7 +45,8 @@ def admin_keyboard():
                [("Generate coupon", "admin:coupon", "🎟️"), ("Plans", "admin:plans", "💎")],
                [("Add premium user", "admin:addpremium", "➕"), ("Premium users", "admin:users", "👥")],
                [("Broadcast", "admin:broadcast", "📢"), ("UPI ID", "admin:upi", "💳")],
-               [("Premium channels", "admin:channels", "📣")]]
+               [("Premium channels", "admin:channels", "📣")],
+               [("Add collection", "admin:addcollection", "🖼️"), ("Update collection link", "admin:updatecollection", "🔗")]]
     return InlineKeyboardMarkup([[button(text, data, emoji) for text, data, emoji in row] for row in buttons])
 
 def plan_text(plan, user, coupon=None):
@@ -59,13 +61,19 @@ def plan_text(plan, user, coupon=None):
 
 @Client.on_message(filters.command("start") & filters.private, group=-2)
 async def start_cmd(client, message):
-    db.initialise(); db.register_user(message.from_user)
+    db.initialise()
+    db.register_user(message.from_user)
     if db.is_banned(message.from_user.id):
         return await message.reply_text("You are banned from using this bot.")
+    if len(message.command) > 1 and message.command[1].startswith("collection_"):
+        return await show_special_collection(client, message.chat.id, message.command[1].removeprefix("collection_"))
     text = (f"<blockquote><b>👋 Welcome, {message.from_user.first_name}!</b></blockquote>\n\n"
-            "<i>Get help instantly or explore exclusive premium access.</i>\n\n"
+            "<i>Get help instantly, explore premium access, or browse special collections.</i>\n\n"
             "<b>✨ Choose an option below to continue.</b>")
-    await message.reply_text(text, reply_markup=InlineKeyboardMarkup([[button("Help", "home:help", "🆘"), button("Premium", "home:premium", "💎")]]))
+    await message.reply_text(text, reply_markup=InlineKeyboardMarkup([
+        [button("Help", "home:help", "🆘"), button("Premium", "home:premium", "💎")],
+        [button("Special collection", "home:collections", "🖼️")],
+    ]))
 
 @Client.on_message(filters.command("admin") & filters.private, group=-2)
 async def admin_command(client, message):
@@ -84,6 +92,24 @@ async def callbacks(client: Client, query: CallbackQuery):
         return await query.message.reply_text("<blockquote><b>🆘 Help</b></blockquote>\n\n<i>Choose a premium plan, optionally apply a coupon, then pay with the generated UPI QR.</i>\n\n<b>📸 Send the payment screenshot when prompted.</b> For support, send a message here.")
     if data == "home:premium":
         return await query.message.reply_text("<blockquote><b>💎 Choose your premium plan</b></blockquote>\n<i>Select the access duration that suits you.</i>", reply_markup=plans_keyboard())
+    if data == "home:collections":
+        collections = db.special_collections_list()
+        if not collections:
+            return await query.message.reply_text("<blockquote><b>🖼️ Special collection</b></blockquote>\n<i>No collections are available right now. Please check again later.</i>")
+        return await show_special_collection(client, query.message.chat.id, collections[0]["slug"])
+    if data.startswith("special:update:") and user.id == ADMIN:
+        states[user.id] = {"action": "collection_link_update", "slug": data.split(":", 2)[2]}
+        return await query.message.reply_text("<b>🔗 Send the new collection access link.</b>")
+    if data.startswith("special:view:"):
+        return await show_special_collection(client, query.message.chat.id, data.split(":", 2)[2])
+    if data.startswith("special:buy:"):
+        return await show_special_checkout(client, query.message.chat.id, data.split(":", 2)[2])
+    if data.startswith("special:pay:"):
+        return await send_special_payment_qr(client, query.message, user, data.split(":", 2)[2])
+    if data.startswith("special:approve:") and user.id == ADMIN:
+        return await approve_special_purchase(client, query.message, data.split(":", 2)[2])
+    if data.startswith("special:reject:") and user.id == ADMIN:
+        return await reject_special_purchase(client, query.message, data.split(":", 2)[2])
     if data.startswith("buy:"):
         plan = db.get_plan(data.split(":", 1)[1])
         if not plan: return
@@ -111,6 +137,17 @@ async def callbacks(client: Client, query: CallbackQuery):
     action = data.split(":", 1)[1]
     if action == "coupon":
         states[user.id] = {"action": "coupon_code"}; return await query.message.reply_text("Send coupon code.")
+    if action == "addcollection":
+        states[user.id] = {"action": "collection_name"}
+        return await query.message.reply_text("<b>🖼️ Send the collection name.</b>")
+    if action == "updatecollection":
+        collections = db.special_collections_list()
+        if not collections:
+            return await query.message.reply_text("❌ No special collections have been added yet.")
+        return await query.message.reply_text(
+            "<b>🔗 Select a collection to update its access link.</b>",
+            reply_markup=InlineKeyboardMarkup([[button(item["name"], f"special:update:{item['slug']}", "🖼️")] for item in collections]),
+        )
     if action == "channels":
         configured_channels = db.channels()
         listing = "\n".join(f"• <code>{channel['channel_id']}</code>" for channel in configured_channels)
@@ -132,6 +169,86 @@ async def callbacks(client: Client, query: CallbackQuery):
         users = db.premium_users()
         text = "<b>Premium users</b>\n\n" + ("\n".join(f"• <code>{x['user_id']}</code> — {x['name'] or x['first_name'] or 'User'} — {'Lifetime' if not x['ends_at'] else x['ends_at'][:10]}" for x in users) or "No premium users yet.")
         return await query.message.reply_text(text)
+
+
+async def show_special_collection(client, chat_id, slug):
+    collection = db.get_special_collection(slug)
+    if not collection:
+        return await client.send_message(chat_id, "❌ This special collection is no longer available.")
+    collections = db.special_collections_list()
+    position = next((index for index, item in enumerate(collections) if item["slug"] == slug), 0)
+    navigation = []
+    if position > 0:
+        navigation.append(button("Previous", f"special:view:{collections[position - 1]['slug']}", "⬅️"))
+    if position < len(collections) - 1:
+        navigation.append(button("Next", f"special:view:{collections[position + 1]['slug']}", "➡️"))
+    keyboard = []
+    if navigation:
+        keyboard.append(navigation)
+    keyboard.append([button("Buy now", f"special:buy:{slug}", "🛒")])
+    caption = (f"<blockquote><b>🖼️ {collection['name']}</b></blockquote>\n\n"
+               f"{collection['caption']}\n\n<b>💰 Price: ₹{collection['amount']}</b>")
+    return await client.send_photo(chat_id, collection["photo_file_id"], caption=caption, reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def show_special_checkout(client, chat_id, slug):
+    collection = db.get_special_collection(slug)
+    if not collection:
+        return await client.send_message(chat_id, "❌ This special collection is no longer available.")
+    caption = (f"<blockquote><b>🛒 Buy {collection['name']}</b></blockquote>\n\n"
+               f"{collection['caption']}\n\n<b>💰 Price: ₹{collection['amount']}</b>\n"
+               "<i>Tap the button below to continue to secure payment.</i>")
+    return await client.send_photo(chat_id, collection["photo_file_id"], caption=caption,
+                                   reply_markup=InlineKeyboardMarkup([[button("Buy now", f"special:pay:{slug}", "💳")]]))
+
+
+async def send_special_payment_qr(client, message, user, slug):
+    collection = db.get_special_collection(slug)
+    if not collection:
+        return await message.reply_text("❌ This special collection is no longer available.")
+    upi = db.get_setting("upi_id")
+    if not upi:
+        return await message.reply_text("❌ Payments are not configured yet. Please contact the admin.")
+    selections[user.id] = {"special_collection": slug}
+    uri = f"upi://pay?pa={upi}&pn=Premium%20Bot&am={collection['amount']}&cu=INR&tn={user.id}"
+    image = qrcode.make(uri)
+    output = io.BytesIO()
+    image.save(output, "PNG")
+    output.name = "special-collection-payment-qr.png"
+    output.seek(0)
+    caption = (f"<blockquote><b>💳 Pay ₹{collection['amount']} for {collection['name']}</b></blockquote>\n"
+               f"<b>UPI ID:</b> <code>{upi}</code>\n<b>Note:</b> <code>{user.id}</code>\n\n"
+               "<i>📱 Scan the QR and use your User ID as the payment note.</i>\n\n"
+               "<b>📸 After payment, tap below to send the screenshot.</b>")
+    await client.send_photo(message.chat.id, output, caption=caption,
+                            reply_markup=InlineKeyboardMarkup([[button("Send payment screenshot", "pay:screenshot", "📸")]]))
+
+
+async def approve_special_purchase(client, message, order_id):
+    purchase = db.get_special_purchase(order_id)
+    if not purchase or purchase["status"] != "pending":
+        return await message.reply_text("❌ This payment request is no longer pending.")
+    collection = db.get_special_collection(purchase["collection_slug"])
+    if not collection:
+        return await message.reply_text("❌ The linked special collection was not found.")
+    db.set_special_purchase_status(order_id, "approved")
+    await client.send_message(purchase["user_id"],
+                              f"<blockquote><b>🎉 Congratulations! Your payment is approved.</b></blockquote>\n\n"
+                              f"<b>🖼️ {collection['name']}</b> access link:\n{collection['access_link']}")
+    return await message.reply_text(f"✅ Approved <code>{order_id}</code> and sent collection access.")
+
+
+async def reject_special_purchase(client, message, order_id):
+    purchase = db.get_special_purchase(order_id)
+    if not purchase or purchase["status"] != "pending":
+        return await message.reply_text("❌ This payment request is no longer pending.")
+    db.set_special_purchase_status(order_id, "rejected")
+    selections[purchase["user_id"]] = {"special_collection": purchase["collection_slug"]}
+    states[purchase["user_id"]] = {"action": "screenshot", "selection": selections[purchase["user_id"]]}
+    await client.send_message(purchase["user_id"],
+                              "<blockquote><b>❌ Payment rejected</b></blockquote>\n\n"
+                              "<i>The payment may be fake or incomplete. Please check again and send a new payment screenshot.</i>")
+    return await message.reply_text(f"✅ Rejected <code>{order_id}</code>; the user can send another screenshot.")
 
 
 async def send_payment_qr(client, message, user):
@@ -157,8 +274,28 @@ async def state_input(client, message: Message):
     state = states[message.from_user.id]; action = state["action"]
     consumed_inputs.add(message.from_user.id)
     if action == "screenshot":
-        if not (message.photo or message.document): return await message.reply_text("Please send the payment screenshot as a photo or document.")
-        selection = state.get("selection") or {}; plan = db.get_plan(selection.get("plan"))
+        if not (message.photo or message.document):
+            return await message.reply_text("Please send the payment screenshot as a photo or document.")
+        selection = state.get("selection") or {}
+        if selection.get("special_collection"):
+            collection = db.get_special_collection(selection["special_collection"])
+            if not collection:
+                states.pop(message.from_user.id, None)
+                return await message.reply_text("❌ This special collection is no longer available.")
+            order_id = uuid.uuid4().hex
+            db.create_special_purchase(order_id, message.from_user.id, collection["slug"])
+            username = f"@{message.from_user.username}" if message.from_user.username else "Not set"
+            caption = ("<blockquote><b>🖼️ Special collection payment verification</b></blockquote>\n"
+                       f"<b>Collection:</b> {collection['name']}\n<b>Amount:</b> ₹{collection['amount']}\n"
+                       f"<b>User:</b> {message.from_user.first_name}\n<b>Username:</b> {username}\n"
+                       f"<b>User ID:</b> <code>{message.from_user.id}</code>\n<b>Order:</b> <code>{order_id}</code>")
+            await message.copy(ADMIN, caption=caption, reply_markup=InlineKeyboardMarkup([[
+                button("Approve", f"special:approve:{order_id}", "✅"),
+                button("Reject", f"special:reject:{order_id}", "❌"),
+            ]]))
+            states.pop(message.from_user.id, None)
+            return await message.reply_text("<blockquote><b>✅ Payment screenshot sent to admin</b></blockquote>\n\n<i>Please wait while we verify your special collection payment.</i>")
+        plan = db.get_plan(selection.get("plan"))
         await message.copy(ADMIN, caption=f"<b>Payment verification required</b>\nUser ID: <code>{message.from_user.id}</code>\nName: {message.from_user.first_name}\nPlan: {plan['name'] if plan else 'Unknown'}\nCoupon: {selection.get('coupon') or 'None'}")
         states.pop(message.from_user.id, None)
         return await message.reply_text("<blockquote><b>✅ Payment screenshot sent to admin</b></blockquote>\n\n<i>Please wait while we verify your payment.</i> You will receive access once verified.")
@@ -171,6 +308,56 @@ async def state_input(client, message: Message):
         return await message.reply_text(f"Coupon <code>{coupon['code']}</code> applied ({coupon['percent']}% off).\n\n{rendered}", reply_markup=InlineKeyboardMarkup([[button("Proceed to pay", "pay:proceed", "💳")]]))
     if message.from_user.id != ADMIN: return
     try:
+        if action == "collection_name":
+            if not text:
+                return await message.reply_text("❌ Please send a valid collection name.")
+            states[ADMIN] = {"action": "collection_photo", "name": text}
+            return await message.reply_text("<b>🖼️ Send the collection photo.</b>")
+        if action == "collection_photo":
+            if not message.photo:
+                return await message.reply_text("❌ Please send the collection as a photo.")
+            state["photo_file_id"] = message.photo.file_id
+            state["action"] = "collection_caption"
+            return await message.reply_text("<b>📝 Send the collection caption.</b>")
+        if action == "collection_caption":
+            if not text:
+                return await message.reply_text("❌ Please send a caption as text.")
+            state["caption"] = text
+            state["action"] = "collection_amount"
+            return await message.reply_text("<b>💰 Send the collection amount in INR.</b>")
+        if action == "collection_amount":
+            amount = int(text)
+            if amount <= 0:
+                raise ValueError
+            state["amount"] = amount
+            state["action"] = "collection_link"
+            return await message.reply_text("<b>🔗 Send the collection access link.</b>")
+        if action == "collection_link":
+            if not text:
+                return await message.reply_text("❌ Please send a valid access link.")
+            slug = db.add_special_collection(state["name"], state["photo_file_id"], state["caption"], state["amount"], text)
+            states.pop(ADMIN, None)
+            me = await client.get_me()
+            purchase_link = f"https://t.me/{me.username}?start=collection_{slug}"
+            return await message.reply_text("<blockquote><b>✅ Special collection saved</b></blockquote>\n\n"
+                                            f"<b>🔗 Share this purchase link:</b>\n{purchase_link}")
+        if action == "collection_link_update":
+            if not text:
+                return await message.reply_text("❌ Please send a valid access link.")
+            collection = db.get_special_collection(state["slug"])
+            if not collection:
+                states.pop(ADMIN, None)
+                return await message.reply_text("❌ This special collection no longer exists.")
+            db.update_special_collection_link(state["slug"], text)
+            notified = 0
+            for user_id in db.approved_collection_user_ids(state["slug"]):
+                try:
+                    await client.send_message(user_id, f"<blockquote><b>🔗 Collection access link updated</b></blockquote>\n\n<b>{collection['name']}</b> new link:\n{text}")
+                    notified += 1
+                except RPCError:
+                    pass
+            states.pop(ADMIN, None)
+            return await message.reply_text(f"✅ Collection link updated and sent to {notified} previous buyer(s).")
         if action == "coupon_code": states[ADMIN] = {"action":"coupon_percent", "code":text.upper()}; return await message.reply_text("Send discount percentage (for example, 20).")
         if action == "coupon_percent":
             percent = int(text); assert 0 < percent <= 100

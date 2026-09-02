@@ -32,6 +32,8 @@ def initialise():
     premium_memberships.create_index("user_id", unique=True)
     premium_channels.create_index("channel_id", unique=True)
     banned_users.create_index("user_id", unique=True)
+    database.special_collections.create_index("slug", unique=True)
+    database.special_purchases.create_index("order_id", unique=True)
     for slug, name, original_price, discounted_price, duration_days in DEFAULT_PLANS:
         plans.update_one(
             {"slug": slug},
@@ -166,3 +168,70 @@ def expired_premium_users():
 
 def remove_premium(user_id):
     premium_memberships.delete_one({"user_id": user_id})
+
+# Special collections are individually purchasable premium products.
+special_collections = database.special_collections
+special_purchases = database.special_purchases
+
+
+def _collection_slug(name):
+    cleaned = "".join(character.lower() if character.isalnum() else "-" for character in name).strip("-")[:40]
+    return cleaned or f"collection-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+
+
+def add_special_collection(name, photo_file_id, caption, amount, access_link):
+    slug = _collection_slug(name)
+    base_slug = slug
+    suffix = 2
+    while special_collections.find_one({"slug": slug}):
+        slug = f"{base_slug}-{suffix}"
+        suffix += 1
+    special_collections.insert_one({
+        "slug": slug,
+        "name": name,
+        "photo_file_id": photo_file_id,
+        "caption": caption,
+        "amount": amount,
+        "access_link": access_link,
+        "created_at": datetime.utcnow().isoformat(),
+    })
+    return slug
+
+
+def special_collections_list():
+    return [_strip_id(collection) for collection in special_collections.find().sort("created_at", ASCENDING)]
+
+
+def get_special_collection(slug):
+    return _strip_id(special_collections.find_one({"slug": slug}))
+
+
+def update_special_collection_link(slug, access_link):
+    special_collections.update_one({"slug": slug}, {"$set": {"access_link": access_link}})
+
+
+def create_special_purchase(order_id, user_id, collection_slug):
+    special_purchases.update_one(
+        {"order_id": order_id},
+        {"$set": {
+            "user_id": user_id,
+            "collection_slug": collection_slug,
+            "status": "pending",
+            "created_at": datetime.utcnow().isoformat(),
+        }, "$setOnInsert": {"order_id": order_id}},
+        upsert=True,
+    )
+
+
+def get_special_purchase(order_id):
+    return _strip_id(special_purchases.find_one({"order_id": order_id}))
+
+
+def set_special_purchase_status(order_id, status):
+    special_purchases.update_one({"order_id": order_id}, {"$set": {"status": status}})
+
+
+def approved_collection_user_ids(slug):
+    return list({purchase["user_id"] for purchase in special_purchases.find(
+        {"collection_slug": slug, "status": "approved"}, {"user_id": 1, "_id": 0}
+    )})
