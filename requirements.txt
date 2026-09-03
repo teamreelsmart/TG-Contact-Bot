@@ -2,3 +2,5 @@ kurigram
 pytz
 tgcrypto
 aiohttp
+qrcode[pil]
+pymongo[srv]
