@@ -24,6 +24,11 @@ def button(label, callback_data, emoji=""):
     prefix = f"{emoji} " if emoji else ""
     return InlineKeyboardButton(f"{prefix}{label.translate(SMALL_CAPS)}", callback_data=callback_data)
 
+
+def collection_button(name, callback_data):
+    """Collection names must stay in the normal font, not the UI small-caps font."""
+    return InlineKeyboardButton(f"🖼️ {name}", callback_data=callback_data)
+
 def is_pending_user_input(user_id):
     return user_id in states
 
@@ -46,7 +51,8 @@ def admin_keyboard():
                [("Add premium user", "admin:addpremium", "➕"), ("Premium users", "admin:users", "👥")],
                [("Broadcast", "admin:broadcast", "📢"), ("UPI ID", "admin:upi", "💳")],
                [("Premium channels", "admin:channels", "📣")],
-               [("Add collection", "admin:addcollection", "🖼️"), ("Update collection link", "admin:updatecollection", "🔗")]]
+               [("Add collection", "admin:addcollection", "🖼️"), ("Update collection link", "admin:updatecollection", "🔗")],
+               [("Delete collection", "admin:deletecollection", "🗑️")]]
     return InlineKeyboardMarkup([[button(text, data, emoji) for text, data, emoji in row] for row in buttons])
 
 def plan_text(plan, user, coupon=None):
@@ -100,6 +106,13 @@ async def callbacks(client: Client, query: CallbackQuery):
     if data.startswith("special:update:") and user.id == ADMIN:
         states[user.id] = {"action": "collection_link_update", "slug": data.split(":", 2)[2]}
         return await query.message.reply_text("<b>🔗 Send the new collection access link.</b>")
+    if data.startswith("special:delete:") and user.id == ADMIN:
+        slug = data.split(":", 2)[2]
+        collection = db.get_special_collection(slug)
+        if not collection:
+            return await query.message.reply_text("❌ This special collection no longer exists.")
+        db.delete_special_collection(slug)
+        return await query.message.reply_text(f"✅ Deleted special collection: <b>{collection['name']}</b>.")
     if data.startswith("special:view:"):
         return await show_special_collection(client, query.message.chat.id, data.split(":", 2)[2])
     if data.startswith("special:buy:"):
@@ -146,7 +159,15 @@ async def callbacks(client: Client, query: CallbackQuery):
             return await query.message.reply_text("❌ No special collections have been added yet.")
         return await query.message.reply_text(
             "<b>🔗 Select a collection to update its access link.</b>",
-            reply_markup=InlineKeyboardMarkup([[button(item["name"], f"special:update:{item['slug']}", "🖼️")] for item in collections]),
+            reply_markup=InlineKeyboardMarkup([[collection_button(item["name"], f"special:update:{item['slug']}")] for item in collections]),
+        )
+    if action == "deletecollection":
+        collections = db.special_collections_list()
+        if not collections:
+            return await query.message.reply_text("❌ No special collections have been added yet.")
+        return await query.message.reply_text(
+            "<b>🗑️ Select a special collection to permanently delete.</b>",
+            reply_markup=InlineKeyboardMarkup([[collection_button(item["name"], f"special:delete:{item['slug']}")] for item in collections]),
         )
     if action == "channels":
         configured_channels = db.channels()
@@ -309,9 +330,10 @@ async def state_input(client, message: Message):
     if message.from_user.id != ADMIN: return
     try:
         if action == "collection_name":
-            if not text:
+            name = db.normalise_collection_name(text)
+            if not name:
                 return await message.reply_text("❌ Please send a valid collection name.")
-            states[ADMIN] = {"action": "collection_photo", "name": text}
+            states[ADMIN] = {"action": "collection_photo", "name": name}
             return await message.reply_text("<b>🖼️ Send the collection photo.</b>")
         if action == "collection_photo":
             if not message.photo:
