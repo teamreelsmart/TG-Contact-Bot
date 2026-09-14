@@ -139,10 +139,28 @@ async def callbacks(client: Client, query: CallbackQuery):
         states[user.id] = {"action": "screenshot", "selection": selections.get(user.id)}
         return await query.message.reply_text("Please send the payment screenshot.")
     if data.startswith("adminplan:") and user.id == ADMIN:
-        slug = data.split(":", 1)[1]; states[user.id] = {"action":"plan_field", "plan":slug}
-        return await query.message.reply_text("Send what to edit:", reply_markup=InlineKeyboardMarkup([[button("Plan name", "field:name", "✏️"), button("Original price", "field:original_price", "💰")], [button("Discounted price", "field:discounted_price", "🏷️")]]))
+        slug = data.split(":", 1)[1]
+        if not db.get_plan(slug):
+            return await query.message.reply_text("❌ This plan is no longer available.")
+        return await query.message.reply_text(
+            "Send what to edit:",
+            reply_markup=InlineKeyboardMarkup([
+                [button("Plan name", f"planfield:{slug}:name", "✏️"), button("Original price", f"planfield:{slug}:original_price", "💰")],
+                [button("Discounted price", f"planfield:{slug}:discounted_price", "🏷️")],
+            ]),
+        )
+    if data.startswith("planfield:") and user.id == ADMIN:
+        _, slug, field = data.split(":", 2)
+        if field not in {"name", "original_price", "discounted_price"} or not db.get_plan(slug):
+            return await query.message.reply_text("❌ This plan option is no longer available.")
+        # Include the plan in the button callback itself. This means the admin
+        # can always edit the discounted amount, even if an earlier state was
+        # cleared while they were looking at the plan options.
+        states[user.id] = {"action": "plan_value", "plan": slug, "field": field}
+        return await query.message.reply_text("Send the new value.")
     if data.startswith("field:") and user.id == ADMIN:
-        if states.get(user.id,{}).get("action") != "plan_field": return
+        if states.get(user.id,{}).get("action") != "plan_field":
+            return await query.message.reply_text("❌ Please select the plan again, then choose the value to edit.")
         states[user.id]["field"] = data.split(":",1)[1]; states[user.id]["action"] = "plan_value"
         return await query.message.reply_text("Send the new value.")
     if not data.startswith("admin:") or user.id != ADMIN:
