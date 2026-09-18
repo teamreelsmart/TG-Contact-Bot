@@ -50,6 +50,7 @@ def admin_keyboard():
                [("Generate coupon", "admin:coupon", "🎟️"), ("Plans", "admin:plans", "💎")],
                [("Add premium user", "admin:addpremium", "➕"), ("Premium users", "admin:users", "👥")],
                [("Broadcast", "admin:broadcast", "📢"), ("UPI ID", "admin:upi", "💳")],
+               [("Offer", "admin:offer", "🔥")],
                [("Premium channels", "admin:channels", "📣")],
                [("Add collection", "admin:addcollection", "🖼️"), ("Update collection link", "admin:updatecollection", "🔗")],
                [("Delete collection", "admin:deletecollection", "🗑️")]]
@@ -168,6 +169,9 @@ async def callbacks(client: Client, query: CallbackQuery):
     action = data.split(":", 1)[1]
     if action == "coupon":
         states[user.id] = {"action": "coupon_code"}; return await query.message.reply_text("Send coupon code.")
+    if action == "offer":
+        states[user.id] = {"action": "offer_photo"}
+        return await query.message.reply_text("<b>🔥 Send the offer image.</b>")
     if action == "addcollection":
         states[user.id] = {"action": "collection_name"}
         return await query.message.reply_text("<b>🖼️ Send the collection name.</b>")
@@ -347,6 +351,34 @@ async def state_input(client, message: Message):
         return await message.reply_text(f"Coupon <code>{coupon['code']}</code> applied ({coupon['percent']}% off).\n\n{rendered}", reply_markup=InlineKeyboardMarkup([[button("Proceed to pay", "pay:proceed", "💳")]]))
     if message.from_user.id != ADMIN: return
     try:
+        if action == "offer_photo":
+            if not message.photo:
+                return await message.reply_text("❌ Please send the offer as a photo.")
+            state["photo_file_id"] = message.photo.file_id
+            state["action"] = "offer_end_date"
+            return await message.reply_text("<b>📅 Send the offer end date in DD-MM-YY format.</b>\nExample: <code>31-12-26</code>")
+        if action == "offer_end_date":
+            offer_end_date = datetime.strptime(text, "%d-%m-%y").strftime("%d-%m-%y")
+            caption = (
+                f"<blockquote><b>➲ 𝗙𝗟𝗔𝗦𝗛 𝗦𝗔𝗟𝗘 𝗔𝗟𝗘𝗥𝗧: {offer_end_date}</b></blockquote>\n\n"
+                "<b>Special offer for you</b>\n"
+                "Get 35 to 45% flat discount on all plans.\n"
+                "<i>Offer ends soon — buy now.</i>"
+            )
+            markup = InlineKeyboardMarkup([[button("Get premium", "home:premium", "💎")]])
+            sent = failed = 0
+            for user_id in db.all_user_ids():
+                try:
+                    await client.send_photo(user_id, state["photo_file_id"], caption=caption, reply_markup=markup)
+                    sent += 1
+                except RPCError:
+                    failed += 1
+            states.pop(ADMIN, None)
+            return await message.reply_text(
+                "<blockquote><b>✅ Offer broadcast complete</b></blockquote>\n\n"
+                f"<b>Offer end date:</b> <code>{offer_end_date}</code>\n"
+                f"<b>Delivered:</b> {sent}\n<b>Failed:</b> {failed}"
+            )
         if action == "collection_name":
             name = db.normalise_collection_name(text)
             if not name:
