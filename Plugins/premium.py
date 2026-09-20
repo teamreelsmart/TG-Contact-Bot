@@ -24,6 +24,11 @@ def button(label, callback_data, emoji=""):
     prefix = f"{emoji} " if emoji else ""
     return InlineKeyboardButton(f"{prefix}{label.translate(SMALL_CAPS)}", callback_data=callback_data)
 
+
+def collection_button(name, callback_data):
+    """Collection names must stay in the normal font, not the UI small-caps font."""
+    return InlineKeyboardButton(f"🖼️ {name}", callback_data=callback_data)
+
 def is_pending_user_input(user_id):
     return user_id in states
 
@@ -45,8 +50,10 @@ def admin_keyboard():
                [("Generate coupon", "admin:coupon", "🎟️"), ("Plans", "admin:plans", "💎")],
                [("Add premium user", "admin:addpremium", "➕"), ("Premium users", "admin:users", "👥")],
                [("Broadcast", "admin:broadcast", "📢"), ("UPI ID", "admin:upi", "💳")],
+               [("Offer", "admin:offer", "🔥")],
                [("Premium channels", "admin:channels", "📣")],
-               [("Add collection", "admin:addcollection", "🖼️"), ("Update collection link", "admin:updatecollection", "🔗")]]
+               [("Add collection", "admin:addcollection", "🖼️"), ("Update collection link", "admin:updatecollection", "🔗")],
+               [("Delete collection", "admin:deletecollection", "🗑️")]]
     return InlineKeyboardMarkup([[button(text, data, emoji) for text, data, emoji in row] for row in buttons])
 
 def plan_text(plan, user, coupon=None):
@@ -100,6 +107,13 @@ async def callbacks(client: Client, query: CallbackQuery):
     if data.startswith("special:update:") and user.id == ADMIN:
         states[user.id] = {"action": "collection_link_update", "slug": data.split(":", 2)[2]}
         return await query.message.reply_text("<b>🔗 Send the new collection access link.</b>")
+    if data.startswith("special:delete:") and user.id == ADMIN:
+        slug = data.split(":", 2)[2]
+        collection = db.get_special_collection(slug)
+        if not collection:
+            return await query.message.reply_text("❌ This special collection no longer exists.")
+        db.delete_special_collection(slug)
+        return await query.message.reply_text(f"✅ Deleted special collection: <b>{collection['name']}</b>.")
     if data.startswith("special:view:"):
         return await show_special_collection(client, query.message.chat.id, data.split(":", 2)[2])
     if data.startswith("special:buy:"):
@@ -126,10 +140,28 @@ async def callbacks(client: Client, query: CallbackQuery):
         states[user.id] = {"action": "screenshot", "selection": selections.get(user.id)}
         return await query.message.reply_text("Please send the payment screenshot.")
     if data.startswith("adminplan:") and user.id == ADMIN:
-        slug = data.split(":", 1)[1]; states[user.id] = {"action":"plan_field", "plan":slug}
-        return await query.message.reply_text("Send what to edit:", reply_markup=InlineKeyboardMarkup([[button("Plan name", "field:name", "✏️"), button("Original price", "field:original_price", "💰")], [button("Discounted price", "field:discounted_price", "🏷️")]]))
+        slug = data.split(":", 1)[1]
+        if not db.get_plan(slug):
+            return await query.message.reply_text("❌ This plan is no longer available.")
+        return await query.message.reply_text(
+            "Send what to edit:",
+            reply_markup=InlineKeyboardMarkup([
+                [button("Plan name", f"planfield:{slug}:name", "✏️"), button("Original price", f"planfield:{slug}:original_price", "💰")],
+                [button("Discounted price", f"planfield:{slug}:discounted_price", "🏷️")],
+            ]),
+        )
+    if data.startswith("planfield:") and user.id == ADMIN:
+        _, slug, field = data.split(":", 2)
+        if field not in {"name", "original_price", "discounted_price"} or not db.get_plan(slug):
+            return await query.message.reply_text("❌ This plan option is no longer available.")
+        # Include the plan in the button callback itself. This means the admin
+        # can always edit the discounted amount, even if an earlier state was
+        # cleared while they were looking at the plan options.
+        states[user.id] = {"action": "plan_value", "plan": slug, "field": field}
+        return await query.message.reply_text("Send the new value.")
     if data.startswith("field:") and user.id == ADMIN:
-        if states.get(user.id,{}).get("action") != "plan_field": return
+        if states.get(user.id,{}).get("action") != "plan_field":
+            return await query.message.reply_text("❌ Please select the plan again, then choose the value to edit.")
         states[user.id]["field"] = data.split(":",1)[1]; states[user.id]["action"] = "plan_value"
         return await query.message.reply_text("Send the new value.")
     if not data.startswith("admin:") or user.id != ADMIN:
@@ -137,6 +169,9 @@ async def callbacks(client: Client, query: CallbackQuery):
     action = data.split(":", 1)[1]
     if action == "coupon":
         states[user.id] = {"action": "coupon_code"}; return await query.message.reply_text("Send coupon code.")
+    if action == "offer":
+        states[user.id] = {"action": "offer_photo"}
+        return await query.message.reply_text("<b>🔥 Send the offer image.</b>")
     if action == "addcollection":
         states[user.id] = {"action": "collection_name"}
         return await query.message.reply_text("<b>🖼️ Send the collection name.</b>")
@@ -146,7 +181,15 @@ async def callbacks(client: Client, query: CallbackQuery):
             return await query.message.reply_text("❌ No special collections have been added yet.")
         return await query.message.reply_text(
             "<b>🔗 Select a collection to update its access link.</b>",
-            reply_markup=InlineKeyboardMarkup([[button(item["name"], f"special:update:{item['slug']}", "🖼️")] for item in collections]),
+            reply_markup=InlineKeyboardMarkup([[collection_button(item["name"], f"special:update:{item['slug']}")] for item in collections]),
+        )
+    if action == "deletecollection":
+        collections = db.special_collections_list()
+        if not collections:
+            return await query.message.reply_text("❌ No special collections have been added yet.")
+        return await query.message.reply_text(
+            "<b>🗑️ Select a special collection to permanently delete.</b>",
+            reply_markup=InlineKeyboardMarkup([[collection_button(item["name"], f"special:delete:{item['slug']}")] for item in collections]),
         )
     if action == "channels":
         configured_channels = db.channels()
@@ -308,10 +351,39 @@ async def state_input(client, message: Message):
         return await message.reply_text(f"Coupon <code>{coupon['code']}</code> applied ({coupon['percent']}% off).\n\n{rendered}", reply_markup=InlineKeyboardMarkup([[button("Proceed to pay", "pay:proceed", "💳")]]))
     if message.from_user.id != ADMIN: return
     try:
+        if action == "offer_photo":
+            if not message.photo:
+                return await message.reply_text("❌ Please send the offer as a photo.")
+            state["photo_file_id"] = message.photo.file_id
+            state["action"] = "offer_end_date"
+            return await message.reply_text("<b>📅 Send the offer end date in DD-MM-YY format.</b>\nExample: <code>31-12-26</code>")
+        if action == "offer_end_date":
+            offer_end_date = datetime.strptime(text, "%d-%m-%y").strftime("%d-%m-%y")
+            caption = (
+                f"<blockquote><b>➲ 𝗙𝗟𝗔𝗦𝗛 𝗦𝗔𝗟𝗘 𝗔𝗟𝗘𝗥𝗧: {offer_end_date}</b></blockquote>\n\n"
+                "<b>Special offer for you</b>\n"
+                "Get 35 to 45% flat discount on all plans.\n"
+                "<i>Offer ends soon — buy now.</i>"
+            )
+            markup = InlineKeyboardMarkup([[button("Get premium", "home:premium", "💎")]])
+            sent = failed = 0
+            for user_id in db.all_user_ids():
+                try:
+                    await client.send_photo(user_id, state["photo_file_id"], caption=caption, reply_markup=markup)
+                    sent += 1
+                except RPCError:
+                    failed += 1
+            states.pop(ADMIN, None)
+            return await message.reply_text(
+                "<blockquote><b>✅ Offer broadcast complete</b></blockquote>\n\n"
+                f"<b>Offer end date:</b> <code>{offer_end_date}</code>\n"
+                f"<b>Delivered:</b> {sent}\n<b>Failed:</b> {failed}"
+            )
         if action == "collection_name":
-            if not text:
+            name = db.normalise_collection_name(text)
+            if not name:
                 return await message.reply_text("❌ Please send a valid collection name.")
-            states[ADMIN] = {"action": "collection_photo", "name": text}
+            states[ADMIN] = {"action": "collection_photo", "name": name}
             return await message.reply_text("<b>🖼️ Send the collection photo.</b>")
         if action == "collection_photo":
             if not message.photo:

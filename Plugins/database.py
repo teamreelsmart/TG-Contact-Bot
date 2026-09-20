@@ -1,4 +1,6 @@
 """MongoDB persistence layer for premium purchases and bot administration."""
+import re
+import unicodedata
 from datetime import datetime
 
 from pymongo import ASCENDING, MongoClient
@@ -34,6 +36,7 @@ def initialise():
     banned_users.create_index("user_id", unique=True)
     database.special_collections.create_index("slug", unique=True)
     database.special_purchases.create_index("order_id", unique=True)
+    repair_special_collections()
     for slug, name, original_price, discounted_price, duration_days in DEFAULT_PLANS:
         plans.update_one(
             {"slug": slug},
@@ -173,19 +176,58 @@ def remove_premium(user_id):
 special_collections = database.special_collections
 special_purchases = database.special_purchases
 
+# These characters are produced by the button styling used in older releases.
+# Telegram deep-link parameters and callback data must be ASCII, so never use
+# this display font in persisted collection names or identifiers.
+SMALL_CAPS = "ᴀʙᴄᴅᴇғɢʜɪᴊᴋʟᴍɴᴏᴘǫʀsᴛᴜᴠᴡxʏᴢ"
+REGULAR_LETTERS = "abcdefghijklmnopqrstuvwxyz"
+SMALL_CAPS_TO_REGULAR = str.maketrans(SMALL_CAPS, REGULAR_LETTERS)
+
+
+def normalise_collection_name(name):
+    """Keep collection titles readable rather than storing the UI small-caps font."""
+    return unicodedata.normalize("NFKC", str(name).translate(SMALL_CAPS_TO_REGULAR)).strip()
+
 
 def _collection_slug(name):
-    cleaned = "".join(character.lower() if character.isalnum() else "-" for character in name).strip("-")[:40]
+    # Fold accented characters where possible, then discard emojis and every
+    # other non-ASCII character.  This makes a valid Telegram start parameter.
+    folded = unicodedata.normalize("NFKD", normalise_collection_name(name)).encode("ascii", "ignore").decode("ascii")
+    cleaned = re.sub(r"[^a-z0-9]+", "-", folded.lower()).strip("-")[:40]
     return cleaned or f"collection-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
 
 
-def add_special_collection(name, photo_file_id, caption, amount, access_link):
-    slug = _collection_slug(name)
-    base_slug = slug
+def _unique_collection_slug(name, excluded_id=None):
+    base_slug = _collection_slug(name)
+    slug = base_slug
     suffix = 2
-    while special_collections.find_one({"slug": slug}):
-        slug = f"{base_slug}-{suffix}"
+    while special_collections.find_one({"slug": slug, **({"_id": {"$ne": excluded_id}} if excluded_id else {})}):
+        suffix_text = f"-{suffix}"
+        slug = f"{base_slug[:40 - len(suffix_text)]}{suffix_text}"
         suffix += 1
+    return slug
+
+
+def repair_special_collections():
+    """Repair collections created before safe slugs and regular names were used."""
+    for collection in special_collections.find().sort("created_at", ASCENDING):
+        clean_name = normalise_collection_name(collection.get("name", ""))
+        needs_slug = not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,39}", collection.get("slug", ""))
+        updates = {}
+        if clean_name != collection.get("name"):
+            updates["name"] = clean_name
+        if needs_slug:
+            new_slug = _unique_collection_slug(clean_name, collection["_id"])
+            old_slug = collection["slug"]
+            updates["slug"] = new_slug
+            special_purchases.update_many({"collection_slug": old_slug}, {"$set": {"collection_slug": new_slug}})
+        if updates:
+            special_collections.update_one({"_id": collection["_id"]}, {"$set": updates})
+
+
+def add_special_collection(name, photo_file_id, caption, amount, access_link):
+    name = normalise_collection_name(name)
+    slug = _unique_collection_slug(name)
     special_collections.insert_one({
         "slug": slug,
         "name": name,
@@ -208,6 +250,14 @@ def get_special_collection(slug):
 
 def update_special_collection_link(slug, access_link):
     special_collections.update_one({"slug": slug}, {"$set": {"access_link": access_link}})
+
+
+def delete_special_collection(slug):
+    """Delete a collection and its purchase records; access links stop working."""
+    result = special_collections.delete_one({"slug": slug})
+    if result.deleted_count:
+        special_purchases.delete_many({"collection_slug": slug})
+    return bool(result.deleted_count)
 
 
 def create_special_purchase(order_id, user_id, collection_slug):
